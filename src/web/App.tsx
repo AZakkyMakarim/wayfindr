@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useState, type FormEvent } from "react";
 
 interface Place {
   id: number;
@@ -7,12 +7,13 @@ interface Place {
   reviewCount: number | null;
   categoryLabel: string | null;
   address: string | null;
-  position: { lat: number; lng: number };
   coverPhoto: string | null;
   snapshotDate: string;
+  googleMapsUrl: string;
 }
 
 interface Search {
+  id: number;
   keyword: string;
   region: string;
   status: "running" | "done" | "failed";
@@ -22,27 +23,93 @@ interface Search {
 
 type Message = { isError: boolean; text: string } | null;
 
+type SortColumn = "name" | "rating" | "reviewCount" | "categoryLabel" | "address" | "snapshotDate";
+
+interface Sort {
+  column: SortColumn;
+  descending: boolean;
+}
+
+// Text fields hold what the user typed; an empty one means no filter.
+interface Filters {
+  searchId: string;
+  categoryLabels: string[];
+  minRating: string;
+  minReviewCount: string;
+}
+
+const NO_FILTERS: Filters = { searchId: "", categoryLabels: [], minRating: "", minReviewCount: "" };
+
+// The first click on these columns sorts the highest or newest value to the top.
+const DESCENDING_FIRST: SortColumn[] = ["rating", "reviewCount", "snapshotDate"];
+
 const numberFormat = new Intl.NumberFormat("id-ID");
 const dateFormat = new Intl.DateTimeFormat("id-ID", { dateStyle: "medium", timeStyle: "short" });
 
-async function fetchPlaces(): Promise<Place[]> {
-  const res = await fetch("/api/places");
-  if (!res.ok) throw new Error(`Gagal memuat daftar Tempat (${res.status}).`);
+async function fetchJson<T>(url: string, what: string): Promise<T> {
+  const res = await fetch(url);
+  if (!res.ok) {
+    // The API explains a rejected request, such as a filter value it cannot read.
+    const body = await res.json().catch(() => null);
+    throw new Error(body?.error ?? `Gagal memuat ${what} (${res.status}).`);
+  }
   return res.json();
+}
+
+function placeListUrl(filters: Filters, sort: Sort | null): string {
+  const params = new URLSearchParams();
+  if (filters.searchId !== "") params.set("search", filters.searchId);
+  for (const label of filters.categoryLabels) params.append("category", label);
+  if (filters.minRating !== "") params.set("minRating", filters.minRating);
+  if (filters.minReviewCount !== "") params.set("minReviewCount", filters.minReviewCount);
+  if (sort) {
+    params.set("sort", sort.column);
+    params.set("order", sort.descending ? "desc" : "asc");
+  }
+  return `/api/places?${params}`;
 }
 
 export function App() {
   const [places, setPlaces] = useState<Place[]>([]);
+  const [searches, setSearches] = useState<Search[]>([]);
+  const [categoryLabels, setCategoryLabels] = useState<string[]>([]);
+  const [filters, setFilters] = useState<Filters>(NO_FILTERS);
+  const [sort, setSort] = useState<Sort | null>(null);
+  const [checkedIds, setCheckedIds] = useState<ReadonlySet<number>>(new Set());
+  // Bumped after a search so the lists are loaded again.
+  const [dataVersion, setDataVersion] = useState(0);
   const [keyword, setKeyword] = useState("");
   const [region, setRegion] = useState("");
   const [isSearching, setIsSearching] = useState(false);
   const [message, setMessage] = useState<Message>(null);
 
+  const showError = useCallback(
+    (error: unknown) =>
+      setMessage({ isError: true, text: error instanceof Error ? error.message : String(error) }),
+    [],
+  );
+
   useEffect(() => {
-    fetchPlaces()
-      .then(setPlaces)
-      .catch((error: Error) => setMessage({ isError: true, text: error.message }));
-  }, []);
+    // A slower, older answer must not replace the list of a newer filter.
+    let isCurrent = true;
+    fetchJson<Place[]>(placeListUrl(filters, sort), "daftar Tempat")
+      .then((loaded) => {
+        if (isCurrent) setPlaces(loaded);
+      })
+      .catch((error) => {
+        if (isCurrent) showError(error);
+      });
+    return () => {
+      isCurrent = false;
+    };
+  }, [filters, sort, dataVersion, showError]);
+
+  useEffect(() => {
+    fetchJson<Search[]>("/api/searches", "daftar Penelusuran").then(setSearches).catch(showError);
+    fetchJson<string[]>("/api/category-labels", "label kategori")
+      .then(setCategoryLabels)
+      .catch(showError);
+  }, [dataVersion, showError]);
 
   async function startSearch(event: FormEvent) {
     event.preventDefault();
@@ -71,12 +138,52 @@ export function App() {
               text: `Penelusuran "${search.keyword}" di ${search.region} selesai: ${search.placeCount} Tempat.`,
             },
       );
-      setPlaces(await fetchPlaces());
+      setDataVersion((version) => version + 1);
     } catch (error) {
-      setMessage({ isError: true, text: error instanceof Error ? error.message : String(error) });
+      showError(error);
     } finally {
       setIsSearching(false);
     }
+  }
+
+  function sortBy(column: SortColumn) {
+    setSort((current) =>
+      current?.column === column
+        ? { column, descending: !current.descending }
+        : { column, descending: DESCENDING_FIRST.includes(column) },
+    );
+  }
+
+  function toggleCategoryLabel(label: string) {
+    setFilters((current) => ({
+      ...current,
+      categoryLabels: current.categoryLabels.includes(label)
+        ? current.categoryLabels.filter((other) => other !== label)
+        : [...current.categoryLabels, label],
+    }));
+  }
+
+  function toggleChecked(id: number) {
+    setCheckedIds((current) => {
+      const next = new Set(current);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
+  }
+
+  function sortableHeader(column: SortColumn, title: string, className?: string) {
+    const isSorted = sort?.column === column;
+    return (
+      <th
+        className={className}
+        aria-sort={isSorted ? (sort.descending ? "descending" : "ascending") : undefined}
+      >
+        <button type="button" className="sort" onClick={() => sortBy(column)}>
+          {title}
+          <span aria-hidden="true">{isSorted ? (sort.descending ? " ▼" : " ▲") : ""}</span>
+        </button>
+      </th>
+    );
   }
 
   return (
@@ -107,23 +214,96 @@ export function App() {
       </form>
       {message && <p className={message.isError ? "message error" : "message"}>{message.text}</p>}
 
-      <p className="message">{numberFormat.format(places.length)} Tempat tersimpan.</p>
+      <div className="filters">
+        <label>
+          Penelusuran
+          <select
+            value={filters.searchId}
+            onChange={(e) => setFilters({ ...filters, searchId: e.target.value })}
+          >
+            <option value="">Semua Penelusuran</option>
+            {searches.map((search) => (
+              <option key={search.id} value={search.id}>
+                {search.keyword} di {search.region}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Rating minimum
+          <input
+            type="number"
+            min="0"
+            max="5"
+            step="0.1"
+            value={filters.minRating}
+            onChange={(e) => setFilters({ ...filters, minRating: e.target.value })}
+          />
+        </label>
+        <label>
+          Jumlah ulasan minimum
+          <input
+            type="number"
+            min="0"
+            step="1"
+            value={filters.minReviewCount}
+            onChange={(e) => setFilters({ ...filters, minReviewCount: e.target.value })}
+          />
+        </label>
+        <button type="button" onClick={() => setFilters(NO_FILTERS)}>
+          Hapus saringan
+        </button>
+        {categoryLabels.length > 0 && (
+          <fieldset>
+            <legend>Label kategori</legend>
+            {categoryLabels.map((label) => (
+              <label key={label} className="choice">
+                <input
+                  type="checkbox"
+                  checked={filters.categoryLabels.includes(label)}
+                  onChange={() => toggleCategoryLabel(label)}
+                />
+                {label}
+              </label>
+            ))}
+          </fieldset>
+        )}
+      </div>
+
+      <p className="message">
+        {numberFormat.format(places.length)} Tempat ditampilkan,{" "}
+        {numberFormat.format(checkedIds.size)} dicentang.{" "}
+        {checkedIds.size > 0 && (
+          <button type="button" onClick={() => setCheckedIds(new Set())}>
+            Hapus centang
+          </button>
+        )}
+      </p>
       <table>
         <thead>
           <tr>
+            <th aria-label="Centang" />
             <th>Foto Sampul</th>
-            <th>Nama</th>
-            <th className="number">Rating</th>
-            <th className="number">Jumlah ulasan</th>
-            <th>Label kategori</th>
-            <th>Alamat</th>
-            <th>Posisi</th>
-            <th>Potret</th>
+            {sortableHeader("name", "Nama")}
+            {sortableHeader("rating", "Rating", "number")}
+            {sortableHeader("reviewCount", "Jumlah ulasan", "number")}
+            {sortableHeader("categoryLabel", "Label kategori")}
+            {sortableHeader("address", "Alamat")}
+            {sortableHeader("snapshotDate", "Potret terakhir")}
+            <th>Google Maps</th>
           </tr>
         </thead>
         <tbody>
           {places.map((place) => (
             <tr key={place.id}>
+              <td>
+                <input
+                  type="checkbox"
+                  aria-label={`Centang ${place.name}`}
+                  checked={checkedIds.has(place.id)}
+                  onChange={() => toggleChecked(place.id)}
+                />
+              </td>
               <td>{place.coverPhoto && <img src={place.coverPhoto} alt="" loading="lazy" />}</td>
               <td>{place.name}</td>
               <td className="number">
@@ -134,10 +314,12 @@ export function App() {
               </td>
               <td>{place.categoryLabel}</td>
               <td>{place.address}</td>
-              <td>
-                {place.position.lat.toFixed(5)}, {place.position.lng.toFixed(5)}
-              </td>
               <td>{dateFormat.format(new Date(place.snapshotDate))}</td>
+              <td>
+                <a href={place.googleMapsUrl} target="_blank" rel="noreferrer">
+                  Buka di Google Maps
+                </a>
+              </td>
             </tr>
           ))}
         </tbody>

@@ -2,8 +2,9 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Hono } from "hono";
+import { googleMapsUrl } from "./google-maps-source/place-url.ts";
 import type { CoverPhoto, GoogleMapsSource } from "./google-maps-source/types.ts";
-import { Storage } from "./storage.ts";
+import { SORT_COLUMNS, Storage, type PlaceQuery } from "./storage.ts";
 
 export interface AppOptions {
   source: GoogleMapsSource;
@@ -32,6 +33,51 @@ function nonEmptyText(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const text = value.trim();
   return text === "" ? null : text;
+}
+
+const WHOLE_NUMBER_PATTERN = /^\d+$/;
+const DECIMAL_NUMBER_PATTERN = /^\d+(\.\d+)?$/;
+
+// Reads the filters and the order of the place list from the query string. A
+// string result is the message of the first invalid parameter.
+function parsePlaceQuery(params: URLSearchParams): PlaceQuery | string {
+  const query: PlaceQuery = {};
+
+  const search = params.get("search");
+  if (search !== null) {
+    if (!WHOLE_NUMBER_PATTERN.test(search)) return "Penelusuran tidak dikenal.";
+    query.searchId = Number(search);
+  }
+
+  const categoryLabels = params.getAll("category");
+  if (categoryLabels.length > 0) query.categoryLabels = categoryLabels;
+
+  const minRating = params.get("minRating");
+  if (minRating !== null) {
+    if (!DECIMAL_NUMBER_PATTERN.test(minRating)) return "Rating minimum harus berupa angka.";
+    query.minRating = Number(minRating);
+  }
+
+  const minReviewCount = params.get("minReviewCount");
+  if (minReviewCount !== null) {
+    if (!WHOLE_NUMBER_PATTERN.test(minReviewCount)) {
+      return "Jumlah ulasan minimum harus berupa bilangan bulat.";
+    }
+    query.minReviewCount = Number(minReviewCount);
+  }
+
+  const sort = params.get("sort");
+  const order = params.get("order") ?? "asc";
+  if (order !== "asc" && order !== "desc") return 'Arah urutan harus "asc" atau "desc".';
+  if (sort !== null) {
+    const column = SORT_COLUMNS.find((candidate) => candidate === sort);
+    if (!column) return `Kolom "${sort}" tidak bisa diurutkan.`;
+    query.sort = { column, descending: order === "desc" };
+  } else if (params.has("order")) {
+    return "Arah urutan butuh kolom yang diurutkan.";
+  }
+
+  return query;
 }
 
 export function createApp(options: AppOptions): App {
@@ -78,14 +124,21 @@ export function createApp(options: AppOptions): App {
     return c.json(storage.search(id), 201);
   });
 
-  hono.get("/api/places", (c) =>
-    c.json(
-      storage.listPlaces().map((place) => ({
+  hono.get("/api/places", (c) => {
+    const query = parsePlaceQuery(new URL(c.req.url).searchParams);
+    if (typeof query === "string") return c.json({ error: query }, 400);
+    return c.json(
+      storage.listPlaces(query).map((place) => ({
         ...place,
         coverPhoto: place.coverPhoto && `/api/photos/${place.coverPhoto}`,
+        googleMapsUrl: googleMapsUrl(place.googleId),
       })),
-    ),
-  );
+    );
+  });
+
+  hono.get("/api/searches", (c) => c.json(storage.listSearches()));
+
+  hono.get("/api/category-labels", (c) => c.json(storage.listCategoryLabels()));
 
   hono.get("/api/photos/:name", (c) => {
     const name = c.req.param("name");
