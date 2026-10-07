@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import type { Boundary } from "../server/region-boundary-finder/types.ts";
+import { RegionPreview } from "./RegionPreview.tsx";
 
 interface Place {
   id: number;
@@ -9,19 +11,38 @@ interface Place {
   address: string | null;
   coverPhoto: string | null;
   snapshotDate: string;
-  googleMapsUrl: string;
+  googleMapsUrl: string | null;
 }
+
+type SearchStatus = "queued" | "running" | "paused" | "done" | "failed";
 
 interface Search {
   id: number;
   keyword: string;
   region: string;
-  status: "running" | "done" | "failed";
-  failureReason: string | null;
+  status: SearchStatus;
+  reason: string | null;
   placeCount: number;
 }
 
-type Message = { isError: boolean; text: string } | null;
+// A region whose name matches what was typed; rejection says why it cannot be searched.
+interface RegionCandidate {
+  id: string;
+  name: string;
+  description: string;
+  adminLevelLabel: string;
+  boundary: Boundary | null;
+  rejection: string | null;
+}
+
+const STATUS_LABELS: Record<SearchStatus, string> = {
+  queued: "Antre",
+  running: "Berjalan",
+  paused: "Terjeda",
+  done: "Selesai",
+  failed: "Gagal",
+};
+const POLL_INTERVAL_MS = 1500;
 
 type SortColumn = "name" | "rating" | "reviewCount" | "categoryLabel" | "address" | "snapshotDate";
 
@@ -46,8 +67,8 @@ const DESCENDING_FIRST: SortColumn[] = ["rating", "reviewCount", "snapshotDate"]
 const numberFormat = new Intl.NumberFormat("id-ID");
 const dateFormat = new Intl.DateTimeFormat("id-ID", { dateStyle: "medium", timeStyle: "short" });
 
-async function fetchJson<T>(url: string, what: string): Promise<T> {
-  const res = await fetch(url);
+async function fetchJson<T>(path: string, what: string): Promise<T> {
+  const res = await fetch(path);
   if (!res.ok) {
     // The API explains a rejected request, such as a filter value it cannot read.
     const body = await res.json().catch(() => null);
@@ -76,73 +97,72 @@ export function App() {
   const [filters, setFilters] = useState<Filters>(NO_FILTERS);
   const [sort, setSort] = useState<Sort | null>(null);
   const [checkedIds, setCheckedIds] = useState<ReadonlySet<number>>(new Set());
-  // Bumped after a search so the lists are loaded again.
-  const [dataVersion, setDataVersion] = useState(0);
   const [keyword, setKeyword] = useState("");
   const [region, setRegion] = useState("");
-  const [isSearching, setIsSearching] = useState(false);
-  const [message, setMessage] = useState<Message>(null);
+  const [candidates, setCandidates] = useState<RegionCandidate[] | null>(null);
+  const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null);
+  const [isLookingUp, setIsLookingUp] = useState(false);
+  const selectedRegion = candidates?.find((candidate) => candidate.id === selectedRegionId) ?? null;
+  const [error, setError] = useState<string | null>(null);
 
-  const showError = useCallback(
-    (error: unknown) =>
-      setMessage({ isError: true, text: error instanceof Error ? error.message : String(error) }),
-    [],
-  );
+  const [isPosting, setIsPosting] = useState(false);
+  const latestRefresh = useRef(0);
+  // Read through a ref so that a poll started earlier still asks for the
+  // filters and order chosen since.
+  const listUrl = placeListUrl(filters, sort);
+  const currentListUrl = useRef(listUrl);
+  currentListUrl.current = listUrl;
 
-  useEffect(() => {
-    // A slower, older answer must not replace the list of a newer filter.
-    let isCurrent = true;
-    fetchJson<Place[]>(placeListUrl(filters, sort), "daftar Tempat")
-      .then((loaded) => {
-        if (isCurrent) setPlaces(loaded);
-      })
-      .catch((error) => {
-        if (isCurrent) showError(error);
-      });
-    return () => {
-      isCurrent = false;
-    };
-  }, [filters, sort, dataVersion, showError]);
-
-  useEffect(() => {
-    fetchJson<Search[]>("/api/searches", "daftar Penelusuran").then(setSearches).catch(showError);
-    fetchJson<string[]>("/api/category-labels", "label kategori")
-      .then(setCategoryLabels)
-      .catch(showError);
-  }, [dataVersion, showError]);
-
-  async function startSearch(event: FormEvent) {
-    event.preventDefault();
-    setIsSearching(true);
-    setMessage({
-      isError: false,
-      text: "Penelusuran berjalan. Jendela browser akan terbuka; biarkan sampai tertutup sendiri.",
-    });
+  async function refresh() {
+    const turn = ++latestRefresh.current;
     try {
-      const res = await fetch("/api/searches", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ keyword, region }),
-      });
+      const [newSearches, newPlaces, newCategoryLabels] = await Promise.all([
+        fetchJson<Search[]>("/api/searches", "daftar Penelusuran"),
+        fetchJson<Place[]>(currentListUrl.current, "daftar Tempat"),
+        fetchJson<string[]>("/api/category-labels", "label kategori"),
+      ]);
+      // A refresh started earlier can answer later; its state is older, so drop it.
+      if (turn !== latestRefresh.current) return;
+      setSearches(newSearches);
+      setPlaces(newPlaces);
+      setCategoryLabels(newCategoryLabels);
+    } catch (cause) {
+      if (turn !== latestRefresh.current) return;
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  useEffect(() => {
+    // A rejected filter value is no longer the case once the filters change.
+    setError(null);
+    void refresh();
+  }, [listUrl]);
+
+  function changeRegion(name: string) {
+    setRegion(name);
+    setCandidates(null);
+    setSelectedRegionId(null);
+  }
+
+  async function lookUpRegion() {
+    if (region.trim() === "") return;
+    setIsLookingUp(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/regions?name=${encodeURIComponent(region)}`);
       const body = await res.json();
       if (!res.ok) {
-        setMessage({ isError: true, text: body.error });
+        setError(body.error);
         return;
       }
-      const search = body as Search;
-      setMessage(
-        search.status === "failed"
-          ? { isError: true, text: `Penelusuran gagal: ${search.failureReason}` }
-          : {
-              isError: false,
-              text: `Penelusuran "${search.keyword}" di ${search.region} selesai: ${search.placeCount} Tempat.`,
-            },
-      );
-      setDataVersion((version) => version + 1);
-    } catch (error) {
-      showError(error);
+      const found = body as RegionCandidate[];
+      const usable = found.filter((candidate) => !candidate.rejection);
+      setCandidates(found);
+      setSelectedRegionId(usable.length === 1 ? usable[0]!.id : null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      setIsSearching(false);
+      setIsLookingUp(false);
     }
   }
 
@@ -186,33 +206,156 @@ export function App() {
     );
   }
 
+  // Statuses only change while the queue is working, so only then is there
+  // anything to poll for.
+  const isQueueWorking = searches.some(
+    (search) => search.status === "queued" || search.status === "running",
+  );
+  const isQueuePaused = searches.some((search) => search.status === "paused");
+  useEffect(() => {
+    if (!isQueueWorking || isQueuePaused) return;
+    const timer = setInterval(refresh, POLL_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [isQueueWorking, isQueuePaused]);
+
+  // Sends a request that changes the queue, then shows the new state.
+  async function post(path: string, body?: unknown) {
+    setError(null);
+    setIsPosting(true);
+    try {
+      const res = await fetch(path, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body ?? {}),
+      });
+      if (!res.ok) {
+        const failure = await res.json().catch(() => null);
+        setError(failure?.error ?? `Permintaan gagal (${res.status}).`);
+        return;
+      }
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setIsPosting(false);
+    }
+  }
+
+  function startSearch(event: FormEvent) {
+    event.preventDefault();
+    if (!selectedRegion) return;
+    void post("/api/searches", { keyword, region, regionId: selectedRegion.id });
+  }
+
   return (
     <>
       <h1>Wayfindr</h1>
       <form onSubmit={startSearch}>
-        <label>
-          Kata Kunci
-          <input
-            value={keyword}
-            onChange={(e) => setKeyword(e.target.value)}
-            placeholder="kopi susu"
-            required
-          />
-        </label>
-        <label>
-          Wilayah
-          <input
-            value={region}
-            onChange={(e) => setRegion(e.target.value)}
-            placeholder="Cilandak"
-            required
-          />
-        </label>
-        <button type="submit" disabled={isSearching}>
-          {isSearching ? "Menelusuri…" : "Mulai Penelusuran"}
-        </button>
+        <div
+          className="fields"
+          onKeyDown={(e) => {
+            // Enter in a text field looks the region up first; a search needs a picked region.
+            if (e.key !== "Enter" || selectedRegion || !(e.target instanceof HTMLInputElement)) return;
+            e.preventDefault();
+            lookUpRegion();
+          }}
+        >
+          <label>
+            Kata Kunci
+            <input
+              value={keyword}
+              onChange={(e) => setKeyword(e.target.value)}
+              placeholder="kopi susu"
+              required
+            />
+          </label>
+          <label>
+            Wilayah
+            <input
+              value={region}
+              onChange={(e) => changeRegion(e.target.value)}
+              placeholder="Cilandak"
+              // The candidates belong to the name that was looked up, so it cannot change under them.
+              disabled={isLookingUp || isPosting}
+              required
+            />
+          </label>
+          <button type="button" onClick={lookUpRegion} disabled={isLookingUp || isPosting}>
+            {isLookingUp ? "Mencari…" : "Cari Wilayah"}
+          </button>
+          <button type="submit" disabled={!selectedRegion || isPosting}>
+            Mulai Penelusuran
+          </button>
+        </div>
+        {candidates?.length === 0 && (
+          <p className="message error">Tidak ada daerah bernama "{region}" di OpenStreetMap.</p>
+        )}
+        {candidates && candidates.length > 0 && (
+          <fieldset className="candidates">
+            <legend>Daerah yang cocok</legend>
+            {candidates.map((candidate) => (
+              <label key={candidate.id} className={candidate.rejection ? "rejected" : undefined}>
+                <input
+                  type="radio"
+                  name="region"
+                  checked={candidate.id === selectedRegionId}
+                  disabled={candidate.rejection !== null || isPosting}
+                  onChange={() => setSelectedRegionId(candidate.id)}
+                />
+                <span>
+                  <strong>{candidate.adminLevelLabel}</strong> {candidate.description}
+                  {candidate.rejection && <small>{candidate.rejection}</small>}
+                </span>
+              </label>
+            ))}
+          </fieldset>
+        )}
+        {selectedRegion?.boundary && <RegionPreview boundary={selectedRegion.boundary} />}
       </form>
-      {message && <p className={message.isError ? "message error" : "message"}>{message.text}</p>}
+      {error && <p className="message error">{error}</p>}
+
+      {isQueuePaused && (
+        <p className="message paused">
+          Antrean pengambilan berhenti. Bila Google meminta CAPTCHA, selesaikan sendiri di jendela
+          browser yang terbuka, lalu tekan Lanjutkan.
+        </p>
+      )}
+      {searches.length > 0 && (
+        <table className="searches">
+          <thead>
+            <tr>
+              <th>Kata Kunci</th>
+              <th>Wilayah</th>
+              <th>Status</th>
+              <th className="number">Tempat</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {searches.toReversed().map((search) => (
+              <tr key={search.id}>
+                <td>{search.keyword}</td>
+                <td>{search.region}</td>
+                <td>
+                  <span className={`status ${search.status}`}>{STATUS_LABELS[search.status]}</span>
+                  {search.reason && `: ${search.reason}`}
+                </td>
+                <td className="number">{numberFormat.format(search.placeCount)}</td>
+                <td>
+                  {search.status === "paused" && (
+                    <button
+                      disabled={isPosting}
+                      onClick={() => post(`/api/searches/${search.id}/resume`)}
+                    >
+                      Lanjutkan
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
 
       <div className="filters">
         <label>
@@ -316,9 +459,11 @@ export function App() {
               <td>{place.address}</td>
               <td>{dateFormat.format(new Date(place.snapshotDate))}</td>
               <td>
-                <a href={place.googleMapsUrl} target="_blank" rel="noreferrer">
-                  Buka di Google Maps
-                </a>
+                {place.googleMapsUrl && (
+                  <a href={place.googleMapsUrl} target="_blank" rel="noreferrer">
+                    Buka di Google Maps
+                  </a>
+                )}
               </td>
             </tr>
           ))}

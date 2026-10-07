@@ -15,7 +15,9 @@ const [keyword = "kopi susu", region = "Cilandak"] = process.argv.slice(2);
 const text = `${keyword} ${region}`;
 
 console.log(`Searching Google Maps for "${text}"...`);
-const result = await new PlaywrightGoogleMapsSource().findPlaces(text);
+const source = new PlaywrightGoogleMapsSource();
+const result = await source.findPlaces(text);
+await source.close();
 
 if (result.kind === "blocked") {
   console.log(`BLOCKED: ${result.reason}`);
