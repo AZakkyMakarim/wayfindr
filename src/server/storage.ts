@@ -1,7 +1,8 @@
 import { DatabaseSync } from "node:sqlite";
 import type { PlaceResult } from "./google-maps-source/types.ts";
+import type { Boundary } from "./region-boundary-finder/types.ts";
 
-export type SearchStatus = "running" | "done" | "failed";
+export type SearchStatus = "queued" | "running" | "paused" | "done" | "failed";
 
 // A search ("Penelusuran" in CONTEXT.md).
 export interface Search {
@@ -9,9 +10,18 @@ export interface Search {
   keyword: string;
   region: string;
   status: SearchStatus;
-  failureReason: string | null;
+  // Why the search is paused or failed.
+  reason: string | null;
   createdAt: string;
   placeCount: number;
+}
+
+// The region of a search: its name, the description that tells Google Maps
+// which of the same-named regions is meant, and the boundary results must be inside.
+export interface SearchRegion {
+  name: string;
+  description: string;
+  boundary: Boundary | null;
 }
 
 export interface ListedPlace {
@@ -33,8 +43,10 @@ const SCHEMA = `
     keyword TEXT NOT NULL,
     region TEXT NOT NULL,
     status TEXT NOT NULL,
-    failure_reason TEXT,
-    created_at TEXT NOT NULL
+    status_reason TEXT,
+    created_at TEXT NOT NULL,
+    region_description TEXT,
+    region_boundary TEXT
   );
   CREATE TABLE IF NOT EXISTS place (
     id INTEGER PRIMARY KEY,
@@ -68,19 +80,54 @@ export class Storage {
     this.#db = new DatabaseSync(databaseFile);
     this.#db.exec("PRAGMA foreign_keys = ON");
     this.#db.exec(SCHEMA);
+    this.#migrate();
+  }
+
+  // Brings a database file made by an older version up to the schema above.
+  #migrate(): void {
+    const columns = this.#db.prepare("PRAGMA table_info(search)").all() as { name: string }[];
+    if (columns.some((column) => column.name === "failure_reason")) {
+      this.#db.exec("ALTER TABLE search RENAME COLUMN failure_reason TO status_reason");
+    }
+    if (!columns.some((column) => column.name === "region_description")) {
+      this.#db.exec("ALTER TABLE search ADD COLUMN region_description TEXT");
+      this.#db.exec("ALTER TABLE search ADD COLUMN region_boundary TEXT");
+    }
   }
 
   close(): void {
     this.#db.close();
   }
 
-  createSearch(keyword: string, region: string, time: Date): number {
+  // The region is stored with the search because the search runs later, from
+  // the queue, possibly after the app was closed and opened again.
+  createSearch(keyword: string, region: SearchRegion, time: Date): number {
     const { lastInsertRowid } = this.#db
       .prepare(
-        "INSERT INTO search (keyword, region, status, created_at) VALUES (?, ?, 'running', ?)",
+        `INSERT INTO search (keyword, region, region_description, region_boundary, status, created_at)
+         VALUES (?, ?, ?, ?, 'queued', ?)`,
       )
-      .run(keyword, region, time.toISOString());
+      .run(
+        keyword,
+        region.name,
+        region.description,
+        JSON.stringify(region.boundary),
+        time.toISOString(),
+      );
     return Number(lastInsertRowid);
+  }
+
+  // What a search needs to query Google Maps. Searches stored before regions
+  // had boundaries have neither a description nor a boundary.
+  searchRegion(searchId: number): SearchRegion {
+    const row = this.#db
+      .prepare("SELECT region, region_description, region_boundary FROM search WHERE id = ?")
+      .get(searchId) as Record<string, any>;
+    return {
+      name: row.region,
+      description: row.region_description ?? row.region,
+      boundary: JSON.parse(row.region_boundary ?? "null"),
+    };
   }
 
   // coverPhoto of each result is the name of an already stored file, not the photo itself.
@@ -120,7 +167,7 @@ export class Storage {
           coverPhoto,
         );
       }
-      this.#db.prepare("UPDATE search SET status = 'done' WHERE id = ?").run(searchId);
+      this.#setStatus(searchId, "done", null);
       this.#db.exec("COMMIT");
     } catch (error) {
       this.#db.exec("ROLLBACK");
@@ -128,28 +175,81 @@ export class Storage {
     }
   }
 
-  markFailed(searchId: number, reason: string): void {
+  #setStatus(searchId: number, status: SearchStatus, reason: string | null): void {
     this.#db
-      .prepare("UPDATE search SET status = 'failed', failure_reason = ? WHERE id = ?")
-      .run(reason, searchId);
+      .prepare("UPDATE search SET status = ?, status_reason = ? WHERE id = ?")
+      .run(status, reason, searchId);
   }
 
-  search(id: number): Search {
+  markRunning(searchId: number): void {
+    this.#setStatus(searchId, "running", null);
+  }
+
+  markPaused(searchId: number, reason: string): void {
+    this.#setStatus(searchId, "paused", reason);
+  }
+
+  markFailed(searchId: number, reason: string): void {
+    this.#setStatus(searchId, "failed", reason);
+  }
+
+  // Puts a paused search back in the queue. Returns false when it is not paused.
+  resume(searchId: number): boolean {
+    const { changes } = this.#db
+      .prepare(
+        "UPDATE search SET status = 'queued', status_reason = NULL WHERE id = ? AND status = 'paused'",
+      )
+      .run(searchId);
+    return changes === 1;
+  }
+
+  // Pauses the search that was at the head of the queue when the app was last
+  // closed, so that it only continues when the user resumes it.
+  pauseInterrupted(reason: string): void {
+    this.#db
+      .prepare("UPDATE search SET status = 'paused', status_reason = ? WHERE status = 'running'")
+      .run(reason);
+    const next = this.nextSearchToRun();
+    if (next) this.markPaused(next.id, reason);
+  }
+
+  // The oldest queued search, or null when nothing is queued or a paused
+  // search is holding the queue.
+  nextSearchToRun(): Search | null {
     const row = this.#db
       .prepare(
-        `SELECT s.*, (SELECT COUNT(*) FROM search_place sp WHERE sp.search_id = s.id) AS place_count
-         FROM search s WHERE s.id = ?`,
+        `SELECT MIN(id) AS id FROM search
+         WHERE status = 'queued' AND NOT EXISTS (SELECT 1 FROM search WHERE status = 'paused')`,
       )
-      .get(id) as Record<string, any>;
-    return {
+      .get() as { id: number | null };
+    return row.id === null ? null : this.search(row.id);
+  }
+
+  search(id: number): Search | null {
+    return this.#searches("WHERE s.id = ?", id)[0] ?? null;
+  }
+
+  listSearches(): Search[] {
+    return this.#searches("ORDER BY s.id");
+  }
+
+  #searches(clause: string, ...parameters: number[]): Search[] {
+    const rows = this.#db
+      .prepare(
+        `SELECT s.id, s.keyword, s.region, s.status, s.status_reason, s.created_at,
+                (SELECT COUNT(*) FROM search_place sp WHERE sp.search_id = s.id) AS place_count
+         FROM search s ${clause}`,
+      )
+      .all(...parameters) as Record<string, any>[];
+    return rows.map((row) => ({
       id: row.id,
       keyword: row.keyword,
       region: row.region,
       status: row.status,
-      failureReason: row.failure_reason,
+      reason: row.status_reason,
       createdAt: row.created_at,
       placeCount: row.place_count,
-    };
+    }));
   }
 
   // Each place is listed with its latest snapshot.

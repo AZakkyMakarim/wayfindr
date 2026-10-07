@@ -7,6 +7,7 @@ import { FakeGoogleMapsSource } from "../src/server/google-maps-source/fake.ts";
 import { FakeRegionBoundaryFinder } from "../src/server/region-boundary-finder/fake.ts";
 import type { Boundary, RegionCandidate } from "../src/server/region-boundary-finder/types.ts";
 import { cilandak, kopiNako, kopiTuku, rectangle, rectangleRing } from "./fixtures.ts";
+import { waitUntilSettled } from "./waiting.ts";
 
 let dir: string;
 let source: FakeGoogleMapsSource;
@@ -149,6 +150,13 @@ function createSearch(keyword: string, region: string, regionId?: string) {
   });
 }
 
+// Creates a search and waits until the queue has stopped working on it.
+async function runSearch(keyword: string, region: string, regionId?: string): Promise<any> {
+  const res = await createSearch(keyword, region, regionId);
+  expect(res.status).toBe(201);
+  return waitUntilSettled(app, (await res.json()).id);
+}
+
 async function listPlaces(): Promise<any[]> {
   return (await app.request("/api/places")).json();
 }
@@ -162,10 +170,9 @@ async function expectRejected(res: Response, messagePart: string) {
 test("a search in a name shared by several regions runs in the one that was picked", async () => {
   finder.knows(cilandak, desaCilandak);
 
-  const res = await createSearch("kopi susu", "Cilandak", "relation/20167290");
+  const search = await runSearch("kopi susu", "Cilandak", "relation/20167290");
 
-  expect(res.status).toBe(201);
-  expect(await res.json()).toMatchObject({ region: "Desa Cilandak", status: "done" });
+  expect(search).toMatchObject({ region: "Desa Cilandak", status: "done" });
   expect(source.searchedTexts).toEqual([
     "kopi susu Desa Cilandak, Kecamatan Anjatan, Indramayu, Jawa Barat, Indonesia",
   ]);
@@ -213,10 +220,9 @@ test.each([
 ])("a search in %s is accepted", async (_case, region) => {
   finder.knows(region);
 
-  const res = await createSearch("kopi susu", region.name);
+  const search = await runSearch("kopi susu", region.name);
 
-  expect(res.status).toBe(201);
-  expect(await res.json()).toMatchObject({ status: "done" });
+  expect(search).toMatchObject({ status: "done" });
 });
 
 test("a search is rejected with the reason when the region boundary finder fails", async () => {
@@ -242,9 +248,9 @@ test("places outside the region boundary are not stored as results of the search
     kopiNako,
   ]);
 
-  const res = await createSearch("kopi susu", "Cilandak");
+  const search = await runSearch("kopi susu", "Cilandak");
 
-  expect(await res.json()).toMatchObject({ status: "done", placeCount: 2 });
+  expect(search).toMatchObject({ status: "done", placeCount: 2 });
   expect((await listPlaces()).map((place) => place.name)).toEqual(["Toko Kopi Tuku", "Kopi Nako"]);
 });
 
@@ -267,7 +273,7 @@ test("the boundary is followed along slanted edges, not just its bounding box", 
     placeAt("Near the north-east corner", -6.02, 106.08),
   ]);
 
-  await createSearch("kopi susu", "Cilandak");
+  await runSearch("kopi susu", "Cilandak");
 
   expect((await listPlaces()).map((place) => place.name)).toEqual(["Near the south-west corner"]);
 });
@@ -283,7 +289,7 @@ test("places in a hole of the region boundary are outside it", async () => {
   finder.knows({ ...cilandak, boundary: withHole });
   source.returns([placeAt("In the hole", -6.2, 106.2), placeAt("On the rim", -6.05, 106.2)]);
 
-  await createSearch("kopi susu", "Cilandak");
+  await runSearch("kopi susu", "Cilandak");
 
   expect((await listPlaces()).map((place) => place.name)).toEqual(["On the rim"]);
 });
@@ -303,7 +309,7 @@ test("places in any part of a region made of several polygons are inside it", as
     placeAt("In the east part", -6.05, 106.35),
   ]);
 
-  await createSearch("kopi susu", "Cilandak");
+  await runSearch("kopi susu", "Cilandak");
 
   expect((await listPlaces()).map((place) => place.name)).toEqual([
     "In the west part",

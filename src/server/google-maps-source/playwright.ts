@@ -1,4 +1,4 @@
-import { chromium, type BrowserContext, type Page } from "playwright";
+import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import type { CoverPhoto, FindPlacesResult, GoogleMapsSource, PlaceResult } from "./types.ts";
 
 // Everything that knows the shape of Google Maps pages (Indonesian UI) lives in
@@ -150,48 +150,63 @@ async function downloadPhoto(context: BrowserContext, url: string | null): Promi
 }
 
 export class PlaywrightGoogleMapsSource implements GoogleMapsSource {
-  async findPlaces(text: string): Promise<FindPlacesResult> {
+  #browser: Browser | null = null;
+  #page: Page | null = null;
+
+  // One browser for the whole app, kept open between queries: the user solves
+  // a CAPTCHA in this window, and the cookies that prove it must still be
+  // there when the fetch is resumed. The system never touches the CAPTCHA.
+  async #openPage(): Promise<Page> {
+    if (this.#browser?.isConnected() && this.#page && !this.#page.isClosed()) return this.#page;
+    await this.close();
     // Visible browser, not logged in (spec #1, "Perilaku pengambilan").
-    const browser = await chromium.launch({ headless: false });
-    try {
-      const context = await browser.newContext({
-        locale: "id-ID",
-        viewport: { width: 1280, height: 900 },
-      });
-      const page = await context.newPage();
-      await page.goto(`https://www.google.com/maps/search/${encodeURIComponent(text)}?hl=id`, {
-        waitUntil: "domcontentloaded",
-      });
+    this.#browser = await chromium.launch({ headless: false });
+    const context = await this.#browser.newContext({
+      locale: "id-ID",
+      viewport: { width: 1280, height: 900 },
+    });
+    this.#page = await context.newPage();
+    return this.#page;
+  }
 
-      const hasFeed = await page
-        .waitForSelector(FEED_SELECTOR, { timeout: 30_000 })
-        .then(() => true)
-        .catch(() => false);
-      const reason = await blockedReason(page);
-      if (reason) return { kind: "blocked", reason };
-      if (!hasFeed) {
-        if ((await page.getByText(NO_RESULTS_TEXT).count()) > 0) {
-          return { kind: "ok", places: [] };
-        }
-        throw new Error(`Google Maps tidak menampilkan daftar hasil untuk "${text}".`);
+  async close(): Promise<void> {
+    await this.#browser?.close().catch(() => {});
+    this.#browser = null;
+    this.#page = null;
+  }
+
+  async findPlaces(text: string): Promise<FindPlacesResult> {
+    const page = await this.#openPage();
+    await page.goto(`https://www.google.com/maps/search/${encodeURIComponent(text)}?hl=id`, {
+      waitUntil: "domcontentloaded",
+    });
+
+    const hasFeed = await page
+      .waitForSelector(FEED_SELECTOR, { timeout: 30_000 })
+      .then(() => true)
+      .catch(() => false);
+    const reason = await blockedReason(page);
+    if (reason) return { kind: "blocked", reason };
+    if (!hasFeed) {
+      if ((await page.getByText(NO_RESULTS_TEXT).count()) > 0) {
+        return { kind: "ok", places: [] };
       }
-
-      const cards = await readAllCards(page);
-      const reasonAfterScroll = await blockedReason(page);
-      if (reasonAfterScroll) return { kind: "blocked", reason: reasonAfterScroll };
-
-      const places: PlaceResult[] = [];
-      const seen = new Set<string>();
-      for (const card of cards) {
-        const parsed = parseCard(card);
-        if (!parsed || seen.has(parsed.googleId)) continue;
-        seen.add(parsed.googleId);
-        await randomDelay(100, 300);
-        places.push({ ...parsed, coverPhoto: await downloadPhoto(context, card.photoUrl) });
-      }
-      return { kind: "ok", places };
-    } finally {
-      await browser.close();
+      throw new Error(`Google Maps tidak menampilkan daftar hasil untuk "${text}".`);
     }
+
+    const cards = await readAllCards(page);
+    const reasonAfterScroll = await blockedReason(page);
+    if (reasonAfterScroll) return { kind: "blocked", reason: reasonAfterScroll };
+
+    const places: PlaceResult[] = [];
+    const seen = new Set<string>();
+    for (const card of cards) {
+      const parsed = parseCard(card);
+      if (!parsed || seen.has(parsed.googleId)) continue;
+      seen.add(parsed.googleId);
+      await randomDelay(100, 300);
+      places.push({ ...parsed, coverPhoto: await downloadPhoto(page.context(), card.photoUrl) });
+    }
+    return { kind: "ok", places };
   }
 }

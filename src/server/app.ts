@@ -2,9 +2,10 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Hono } from "hono";
+import { FetchQueue } from "./fetch-queue.ts";
 import type { CoverPhoto, GoogleMapsSource } from "./google-maps-source/types.ts";
 import type { RegionBoundaryFinder, RegionCandidate } from "./region-boundary-finder/types.ts";
-import { ADMIN_LEVEL_LABELS, isInsideBoundary, regionRejection } from "./region.ts";
+import { ADMIN_LEVEL_LABELS, regionRejection } from "./region.ts";
 import { Storage } from "./storage.ts";
 
 export interface AppOptions {
@@ -60,7 +61,12 @@ export function createApp(options: AppOptions): App {
     return name;
   }
 
-  // Error messages and failure reasons are shown to the user, so they are in Indonesian.
+  // Error messages and status reasons are shown to the user, so they are in Indonesian.
+  // No fetch starts on its own (spec #1, story 18): whatever the last run left
+  // unfinished waits for the user to resume it.
+  storage.pauseInterrupted("Terputus karena aplikasi ditutup.");
+  const queue = new FetchQueue({ source, storage, savePhoto, now });
+
   hono.post("/api/searches", async (c) => {
     const body = await c.req.json().catch(() => null);
     const keyword = nonEmptyText(body?.keyword);
@@ -97,27 +103,27 @@ export function createApp(options: AppOptions): App {
     }
     const rejection = regionRejection(region);
     if (rejection) return c.json({ error: rejection }, 400);
-    const boundary = region.boundary!;
 
-    const id = storage.createSearch(keyword, region.name, now());
-    try {
-      // The description tells Google Maps which of the same-named regions is meant.
-      const result = await source.findPlaces(`${keyword} ${region.description}`);
-      if (result.kind === "blocked") {
-        storage.markFailed(id, result.reason);
-      } else {
-        storage.saveResults(
-          id,
-          result.places
-            .filter((place) => isInsideBoundary(place.position, boundary))
-            .map((place) => ({ place, coverPhoto: savePhoto(place.coverPhoto) })),
-          now(),
-        );
-      }
-    } catch (error) {
-      storage.markFailed(id, error instanceof Error ? error.message : String(error));
+    const search = storage.search(storage.createSearch(keyword, region, now()));
+    queue.wake();
+    return c.json(search, 201);
+  });
+
+  hono.get("/api/searches", (c) => c.json(storage.listSearches()));
+
+  hono.get("/api/searches/:id", (c) => {
+    const search = storage.search(Number(c.req.param("id")));
+    return search ? c.json(search) : c.notFound();
+  });
+
+  hono.post("/api/searches/:id/resume", (c) => {
+    const id = Number(c.req.param("id"));
+    if (!storage.search(id)) return c.notFound();
+    if (!storage.resume(id)) {
+      return c.json({ error: "Hanya Penelusuran yang terjeda yang bisa dilanjutkan." }, 409);
     }
-    return c.json(storage.search(id), 201);
+    queue.wake();
+    return c.json(storage.search(id));
   });
 
   hono.get("/api/regions", async (c) => {
@@ -161,6 +167,9 @@ export function createApp(options: AppOptions): App {
   return {
     hono,
     request: hono.request.bind(hono),
-    close: () => storage.close(),
+    close: () => {
+      queue.stop();
+      storage.close();
+    },
   };
 }

@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { Boundary } from "../server/region-boundary-finder/types.ts";
 import { RegionPreview } from "./RegionPreview.tsx";
 
@@ -14,11 +14,14 @@ interface Place {
   snapshotDate: string;
 }
 
+type SearchStatus = "queued" | "running" | "paused" | "done" | "failed";
+
 interface Search {
+  id: number;
   keyword: string;
   region: string;
-  status: "running" | "done" | "failed";
-  failureReason: string | null;
+  status: SearchStatus;
+  reason: string | null;
   placeCount: number;
 }
 
@@ -32,32 +35,56 @@ interface RegionCandidate {
   rejection: string | null;
 }
 
-type Message = { isError: boolean; text: string } | null;
+const STATUS_LABELS: Record<SearchStatus, string> = {
+  queued: "Antre",
+  running: "Berjalan",
+  paused: "Terjeda",
+  done: "Selesai",
+  failed: "Gagal",
+};
+const POLL_INTERVAL_MS = 1500;
 
 const numberFormat = new Intl.NumberFormat("id-ID");
 const dateFormat = new Intl.DateTimeFormat("id-ID", { dateStyle: "medium", timeStyle: "short" });
 
-async function fetchPlaces(): Promise<Place[]> {
-  const res = await fetch("/api/places");
-  if (!res.ok) throw new Error(`Gagal memuat daftar Tempat (${res.status}).`);
+async function fetchJson<T>(path: string, what: string): Promise<T> {
+  const res = await fetch(path);
+  if (!res.ok) throw new Error(`Gagal memuat ${what} (${res.status}).`);
   return res.json();
 }
 
 export function App() {
   const [places, setPlaces] = useState<Place[]>([]);
+  const [searches, setSearches] = useState<Search[]>([]);
   const [keyword, setKeyword] = useState("");
   const [region, setRegion] = useState("");
   const [candidates, setCandidates] = useState<RegionCandidate[] | null>(null);
   const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null);
   const [isLookingUp, setIsLookingUp] = useState(false);
-  const [isSearching, setIsSearching] = useState(false);
-  const [message, setMessage] = useState<Message>(null);
   const selectedRegion = candidates?.find((candidate) => candidate.id === selectedRegionId) ?? null;
+  const [error, setError] = useState<string | null>(null);
+
+  const [isPosting, setIsPosting] = useState(false);
+  const latestRefresh = useRef(0);
+
+  async function refresh() {
+    const turn = ++latestRefresh.current;
+    try {
+      const [newSearches, newPlaces] = await Promise.all([
+        fetchJson<Search[]>("/api/searches", "daftar Penelusuran"),
+        fetchJson<Place[]>("/api/places", "daftar Tempat"),
+      ]);
+      // A refresh started earlier can answer later; its state is older, so drop it.
+      if (turn !== latestRefresh.current) return;
+      setSearches(newSearches);
+      setPlaces(newPlaces);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
 
   useEffect(() => {
-    fetchPlaces()
-      .then(setPlaces)
-      .catch((error: Error) => setMessage({ isError: true, text: error.message }));
+    void refresh();
   }, []);
 
   function changeRegion(name: string) {
@@ -69,59 +96,64 @@ export function App() {
   async function lookUpRegion() {
     if (region.trim() === "") return;
     setIsLookingUp(true);
-    setMessage(null);
+    setError(null);
     try {
       const res = await fetch(`/api/regions?name=${encodeURIComponent(region)}`);
       const body = await res.json();
       if (!res.ok) {
-        setMessage({ isError: true, text: body.error });
+        setError(body.error);
         return;
       }
       const found = body as RegionCandidate[];
       const usable = found.filter((candidate) => !candidate.rejection);
       setCandidates(found);
       setSelectedRegionId(usable.length === 1 ? usable[0]!.id : null);
-    } catch (error) {
-      setMessage({ isError: true, text: error instanceof Error ? error.message : String(error) });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setIsLookingUp(false);
     }
   }
 
-  async function startSearch(event: FormEvent) {
-    event.preventDefault();
-    if (!selectedRegion) return;
-    setIsSearching(true);
-    setMessage({
-      isError: false,
-      text: "Penelusuran berjalan. Jendela browser akan terbuka; biarkan sampai tertutup sendiri.",
-    });
+  // Statuses only change while the queue is working, so only then is there
+  // anything to poll for.
+  const isQueueWorking = searches.some(
+    (search) => search.status === "queued" || search.status === "running",
+  );
+  const isQueuePaused = searches.some((search) => search.status === "paused");
+  useEffect(() => {
+    if (!isQueueWorking || isQueuePaused) return;
+    const timer = setInterval(refresh, POLL_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [isQueueWorking, isQueuePaused]);
+
+  // Sends a request that changes the queue, then shows the new state.
+  async function post(path: string, body?: unknown) {
+    setError(null);
+    setIsPosting(true);
     try {
-      const res = await fetch("/api/searches", {
+      const res = await fetch(path, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ keyword, region, regionId: selectedRegion.id }),
+        body: JSON.stringify(body ?? {}),
       });
-      const body = await res.json();
       if (!res.ok) {
-        setMessage({ isError: true, text: body.error });
+        const failure = await res.json().catch(() => null);
+        setError(failure?.error ?? `Permintaan gagal (${res.status}).`);
         return;
       }
-      const search = body as Search;
-      setMessage(
-        search.status === "failed"
-          ? { isError: true, text: `Penelusuran gagal: ${search.failureReason}` }
-          : {
-              isError: false,
-              text: `Penelusuran "${search.keyword}" di ${search.region} selesai: ${search.placeCount} Tempat.`,
-            },
-      );
-      setPlaces(await fetchPlaces());
-    } catch (error) {
-      setMessage({ isError: true, text: error instanceof Error ? error.message : String(error) });
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      setIsSearching(false);
+      setIsPosting(false);
     }
+  }
+
+  function startSearch(event: FormEvent) {
+    event.preventDefault();
+    if (!selectedRegion) return;
+    void post("/api/searches", { keyword, region, regionId: selectedRegion.id });
   }
 
   return (
@@ -153,15 +185,15 @@ export function App() {
               onChange={(e) => changeRegion(e.target.value)}
               placeholder="Cilandak"
               // The candidates belong to the name that was looked up, so it cannot change under them.
-              disabled={isLookingUp || isSearching}
+              disabled={isLookingUp || isPosting}
               required
             />
           </label>
-          <button type="button" onClick={lookUpRegion} disabled={isLookingUp || isSearching}>
+          <button type="button" onClick={lookUpRegion} disabled={isLookingUp || isPosting}>
             {isLookingUp ? "Mencari…" : "Cari Wilayah"}
           </button>
-          <button type="submit" disabled={!selectedRegion || isSearching}>
-            {isSearching ? "Menelusuri…" : "Mulai Penelusuran"}
+          <button type="submit" disabled={!selectedRegion || isPosting}>
+            Mulai Penelusuran
           </button>
         </div>
         {candidates?.length === 0 && (
@@ -176,7 +208,7 @@ export function App() {
                   type="radio"
                   name="region"
                   checked={candidate.id === selectedRegionId}
-                  disabled={candidate.rejection !== null || isSearching}
+                  disabled={candidate.rejection !== null || isPosting}
                   onChange={() => setSelectedRegionId(candidate.id)}
                 />
                 <span>
@@ -189,7 +221,50 @@ export function App() {
         )}
         {selectedRegion?.boundary && <RegionPreview boundary={selectedRegion.boundary} />}
       </form>
-      {message && <p className={message.isError ? "message error" : "message"}>{message.text}</p>}
+      {error && <p className="message error">{error}</p>}
+
+      {isQueuePaused && (
+        <p className="message paused">
+          Antrean pengambilan berhenti. Bila Google meminta CAPTCHA, selesaikan sendiri di jendela
+          browser yang terbuka, lalu tekan Lanjutkan.
+        </p>
+      )}
+      {searches.length > 0 && (
+        <table className="searches">
+          <thead>
+            <tr>
+              <th>Kata Kunci</th>
+              <th>Wilayah</th>
+              <th>Status</th>
+              <th className="number">Tempat</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {searches.toReversed().map((search) => (
+              <tr key={search.id}>
+                <td>{search.keyword}</td>
+                <td>{search.region}</td>
+                <td>
+                  <span className={`status ${search.status}`}>{STATUS_LABELS[search.status]}</span>
+                  {search.reason && `: ${search.reason}`}
+                </td>
+                <td className="number">{numberFormat.format(search.placeCount)}</td>
+                <td>
+                  {search.status === "paused" && (
+                    <button
+                      disabled={isPosting}
+                      onClick={() => post(`/api/searches/${search.id}/resume`)}
+                    >
+                      Lanjutkan
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
 
       <p className="message">{numberFormat.format(places.length)} Tempat tersimpan.</p>
       <table>

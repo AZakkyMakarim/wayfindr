@@ -11,6 +11,8 @@ npm start
 
 Lalu buka http://localhost:4321. Data tersimpan di folder `data/` (basis data SQLite dan foto).
 
+Penelusuran dikerjakan satu per satu lewat antrean, di satu jendela browser yang tetap terbuka selama aplikasi berjalan. Bila Google meminta CAPTCHA, antrean berhenti dengan status terjeda: selesaikan CAPTCHA sendiri di jendela itu, lalu tekan "Lanjutkan". Penelusuran yang terputus karena aplikasi ditutup juga menunggu "Lanjutkan".
+
 ## Pengembangan
 
 - `npm test`: tes otomatis lewat API HTTP, dengan SQLite sungguhan serta Sumber Google Maps dan Pencari batas Wilayah palsu.

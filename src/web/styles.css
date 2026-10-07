@@ -69,9 +69,21 @@ button {
   color: #b42318;
 }
 
+.paused {
+  color: #9a6700;
+}
+
+.status {
+  font-weight: 600;
+}
+
 table {
   border-collapse: collapse;
   width: 100%;
+}
+
+table.searches {
+  margin-bottom: 20px;
 }
 
 th,
