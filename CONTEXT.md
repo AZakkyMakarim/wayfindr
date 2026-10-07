@@ -51,3 +51,24 @@ _Avoid_: Review, komentar, testimoni
 **Perbandingan**:
 Tampilan sementara yang menyandingkan paling banyak lima Tempat pilihan pengguna dari Tempat yang sudah terkumpul; tidak disimpan dan boleh mencampur Tempat dari Penelusuran berbeda.
 _Avoid_: Head to head, duel, Penelusuran, peserta
+
+## Nama di kode
+
+Kode (nama file, fungsi, variabel, kolom basis data, rute API, nama tes, komentar) ditulis dalam bahasa Inggris. Istilah di atas dipakai di dokumentasi, issue, dan teks yang tampil di layar. Padanannya di kode:
+
+| Istilah | Di kode |
+| --- | --- |
+| Tempat | `place` |
+| Wilayah | `region` |
+| Kata Kunci | `keyword` |
+| Penelusuran | `search` |
+| Potret | `snapshot` |
+| Data Ringkas | summary data |
+| Data Detail | detail data |
+| Ambil Detail | fetch details |
+| Foto Sampul | `coverPhoto` |
+| Kelompok Foto | `photoGroup` |
+| Ulasan | `review` |
+| Perbandingan | `comparison` |
+
+Satu kueri ke Google Maps oleh Sumber Google Maps (`GoogleMapsSource`) bernama `findPlaces`, supaya tidak tertukar dengan `search`.

@@ -1,0 +1,65 @@
+body {
+  margin: 0;
+  padding: 24px;
+  font-family: system-ui, sans-serif;
+  font-size: 14px;
+  color: #1f2328;
+}
+
+h1 {
+  margin: 0 0 16px;
+  font-size: 20px;
+}
+
+form {
+  display: flex;
+  gap: 8px;
+  align-items: end;
+  margin-bottom: 12px;
+}
+
+label {
+  display: grid;
+  gap: 4px;
+}
+
+input,
+button {
+  padding: 6px 10px;
+  font: inherit;
+}
+
+.message {
+  margin: 0 0 12px;
+}
+
+.error {
+  color: #b42318;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+th,
+td {
+  padding: 6px 10px;
+  border-bottom: 1px solid #d0d7de;
+  text-align: left;
+  vertical-align: middle;
+}
+
+td.number,
+th.number {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+td img {
+  display: block;
+  width: 56px;
+  height: 56px;
+  object-fit: cover;
+  border-radius: 4px;
+}
