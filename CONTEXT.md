@@ -71,4 +71,4 @@ Kode (nama file, fungsi, variabel, kolom basis data, rute API, nama tes, komenta
 | Ulasan | `review` |
 | Perbandingan | `comparison` |
 
-Satu kueri ke Google Maps oleh Sumber Google Maps (`GoogleMapsSource`) bernama `findPlaces`, supaya tidak tertukar dengan `search`.
+Satu kueri ke Google Maps oleh Sumber Google Maps (`GoogleMapsSource`) bernama `findPlaces`, supaya tidak tertukar dengan `search`. Pencari batas Wilayah (`RegionBoundaryFinder`) mencari daerah yang cocok dengan satu nama lewat `findRegions`.

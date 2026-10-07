@@ -12,6 +12,10 @@ h1 {
 }
 
 form {
+  margin-bottom: 12px;
+}
+
+.fields {
   display: flex;
   gap: 8px;
   align-items: end;
@@ -27,6 +31,34 @@ input,
 button {
   padding: 6px 10px;
   font: inherit;
+}
+
+.candidates {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border: 1px solid #d0d7de;
+}
+
+.candidates label {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.candidates .rejected {
+  color: #656d76;
+}
+
+.candidates small {
+  display: block;
+}
+
+.region-preview {
+  height: 360px;
+  margin-bottom: 12px;
+  border: 1px solid #d0d7de;
 }
 
 .message {

@@ -4,16 +4,19 @@ import { join } from "node:path";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { createApp, type App } from "../src/server/app.ts";
 import { FakeGoogleMapsSource } from "../src/server/google-maps-source/fake.ts";
-import type { PlaceResult } from "../src/server/google-maps-source/types.ts";
+import { FakeRegionBoundaryFinder } from "../src/server/region-boundary-finder/fake.ts";
+import { cilandak, kopiNako, kopiTuku } from "./fixtures.ts";
 
 let dir: string;
 let source: FakeGoogleMapsSource;
+let finder: FakeRegionBoundaryFinder;
 let now: Date;
 let app: App;
 
 function openApp(): App {
   return createApp({
     source,
+    regionBoundaryFinder: finder,
     databaseFile: join(dir, "wayfindr.db"),
     photoDir: join(dir, "photos"),
     now: () => now,
@@ -23,6 +26,8 @@ function openApp(): App {
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "wayfindr-"));
   source = new FakeGoogleMapsSource();
+  finder = new FakeRegionBoundaryFinder();
+  finder.knows(cilandak);
   now = new Date("2026-10-07T03:00:00.000Z");
   app = openApp();
 });
@@ -31,28 +36,6 @@ afterEach(() => {
   app.close();
   rmSync(dir, { recursive: true, force: true });
 });
-
-const kopiTuku: PlaceResult = {
-  googleId: "0x2e69f1:0xaaa1",
-  name: "Toko Kopi Tuku",
-  rating: 4.6,
-  reviewCount: 1234,
-  categoryLabel: "Kedai Kopi",
-  address: "Jl. Cipete Raya No.7",
-  position: { lat: -6.2731, lng: 106.8042 },
-  coverPhoto: null,
-};
-
-const kopiNako: PlaceResult = {
-  googleId: "0x2e69f1:0xbbb2",
-  name: "Kopi Nako",
-  rating: 4.4,
-  reviewCount: 870,
-  categoryLabel: "Kafe",
-  address: "Jl. Kemang Selatan No.10",
-  position: { lat: -6.2702, lng: 106.8155 },
-  coverPhoto: null,
-};
 
 function createSearch(keyword: unknown, region: unknown) {
   return app.request("/api/searches", {
@@ -95,10 +78,12 @@ test("a search stores each result as a place with a dated snapshot of its summar
   });
 });
 
-test("the region name is appended to the keyword as the text of a single Google Maps query", async () => {
+test("the region description is appended to the keyword as the text of a single Google Maps query", async () => {
   await createSearch("kopi susu", "Cilandak");
 
-  expect(source.searchedTexts).toEqual(["kopi susu Cilandak"]);
+  expect(source.searchedTexts).toEqual([
+    "kopi susu Cilandak, Jakarta Selatan, Daerah Khusus Ibukota Jakarta, Indonesia",
+  ]);
 });
 
 test("the same result from two searches stays one place and shows its latest snapshot", async () => {
@@ -149,12 +134,13 @@ test.each([
   ["an empty keyword", "  ", "Cilandak"],
   ["an empty region", "kopi susu", ""],
   ["a keyword that is not text", 42, "Cilandak"],
-])("a search with %s is rejected without querying Google Maps", async (_case, keyword, region) => {
+])("a search with %s is rejected without querying anything", async (_case, keyword, region) => {
   const res = await createSearch(keyword, region);
 
   expect(res.status).toBe(400);
   expect(await res.json()).toEqual({ error: expect.any(String) });
   expect(source.searchedTexts).toEqual([]);
+  expect(finder.lookedUpNames).toEqual([]);
 });
 
 test("a blocked search is marked failed with the reason and stores no places", async () => {

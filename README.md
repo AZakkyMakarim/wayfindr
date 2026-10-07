@@ -13,6 +13,7 @@ Lalu buka http://localhost:4321. Data tersimpan di folder `data/` (basis data SQ
 
 ## Pengembangan
 
-- `npm test`: tes otomatis lewat API HTTP, dengan SQLite sungguhan dan Sumber Google Maps palsu.
+- `npm test`: tes otomatis lewat API HTTP, dengan SQLite sungguhan serta Sumber Google Maps dan Pencari batas Wilayah palsu.
 - `npm run typecheck`
 - `npm run try-source -- "kopi susu" "Cilandak"`: uji coba manual Sumber Google Maps sungguhan. Jalankan ini bila hasil Penelusuran terlihat salah; kode yang membaca halaman Google Maps hanya ada di `src/server/google-maps-source/playwright.ts`.
+- `npm run try-region -- "Cilandak"`: uji coba manual Pencari batas Wilayah sungguhan (Nominatim, OpenStreetMap). Kode yang membaca jawaban Nominatim hanya ada di `src/server/region-boundary-finder/nominatim.ts`.

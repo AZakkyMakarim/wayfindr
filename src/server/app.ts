@@ -3,10 +3,13 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Hono } from "hono";
 import type { CoverPhoto, GoogleMapsSource } from "./google-maps-source/types.ts";
+import type { RegionBoundaryFinder, RegionCandidate } from "./region-boundary-finder/types.ts";
+import { ADMIN_LEVEL_LABELS, isInsideBoundary, regionRejection } from "./region.ts";
 import { Storage } from "./storage.ts";
 
 export interface AppOptions {
   source: GoogleMapsSource;
+  regionBoundaryFinder: RegionBoundaryFinder;
   databaseFile: string;
   photoDir: string;
   now?: () => Date;
@@ -34,8 +37,13 @@ function nonEmptyText(value: unknown): string | null {
   return text === "" ? null : text;
 }
 
+function regionLookupFailure(error: unknown): string {
+  const reason = error instanceof Error ? error.message : String(error);
+  return `Batas Wilayah gagal dicari: ${reason}`;
+}
+
 export function createApp(options: AppOptions): App {
-  const { source, photoDir } = options;
+  const { source, regionBoundaryFinder, photoDir } = options;
   const now = options.now ?? (() => new Date());
   const storage = new Storage(options.databaseFile);
   mkdirSync(photoDir, { recursive: true });
@@ -56,19 +64,53 @@ export function createApp(options: AppOptions): App {
   hono.post("/api/searches", async (c) => {
     const body = await c.req.json().catch(() => null);
     const keyword = nonEmptyText(body?.keyword);
-    const region = nonEmptyText(body?.region);
+    const regionName = nonEmptyText(body?.region);
     if (!keyword) return c.json({ error: "Kata Kunci wajib diisi." }, 400);
-    if (!region) return c.json({ error: "Wilayah wajib diisi." }, 400);
+    if (!regionName) return c.json({ error: "Wilayah wajib diisi." }, 400);
 
-    const id = storage.createSearch(keyword, region, now());
+    const regionId = nonEmptyText(body?.regionId);
+
+    let candidates: RegionCandidate[];
     try {
-      const result = await source.findPlaces(`${keyword} ${region}`);
+      candidates = await regionBoundaryFinder.findRegions(regionName);
+    } catch (error) {
+      return c.json({ error: regionLookupFailure(error) }, 502);
+    }
+    if (candidates.length === 0) {
+      return c.json({ error: `Tidak ada daerah bernama "${regionName}" di OpenStreetMap.` }, 400);
+    }
+    // The region is never guessed: with several matches the user has to pick one.
+    if (!regionId && candidates.length > 1) {
+      return c.json(
+        { error: `Ada ${candidates.length} daerah bernama "${regionName}"; pilih salah satu.` },
+        400,
+      );
+    }
+    const region = regionId
+      ? candidates.find((candidate) => candidate.id === regionId)
+      : candidates[0];
+    if (!region) {
+      return c.json(
+        { error: `Wilayah yang dipilih tidak ada di antara daerah bernama "${regionName}".` },
+        400,
+      );
+    }
+    const rejection = regionRejection(region);
+    if (rejection) return c.json({ error: rejection }, 400);
+    const boundary = region.boundary!;
+
+    const id = storage.createSearch(keyword, region.name, now());
+    try {
+      // The description tells Google Maps which of the same-named regions is meant.
+      const result = await source.findPlaces(`${keyword} ${region.description}`);
       if (result.kind === "blocked") {
         storage.markFailed(id, result.reason);
       } else {
         storage.saveResults(
           id,
-          result.places.map((place) => ({ place, coverPhoto: savePhoto(place.coverPhoto) })),
+          result.places
+            .filter((place) => isInsideBoundary(place.position, boundary))
+            .map((place) => ({ place, coverPhoto: savePhoto(place.coverPhoto) })),
           now(),
         );
       }
@@ -76,6 +118,24 @@ export function createApp(options: AppOptions): App {
       storage.markFailed(id, error instanceof Error ? error.message : String(error));
     }
     return c.json(storage.search(id), 201);
+  });
+
+  hono.get("/api/regions", async (c) => {
+    const name = nonEmptyText(c.req.query("name"));
+    if (!name) return c.json({ error: "Nama Wilayah wajib diisi." }, 400);
+    let candidates: RegionCandidate[];
+    try {
+      candidates = await regionBoundaryFinder.findRegions(name);
+    } catch (error) {
+      return c.json({ error: regionLookupFailure(error) }, 502);
+    }
+    return c.json(
+      candidates.map((candidate) => ({
+        ...candidate,
+        adminLevelLabel: ADMIN_LEVEL_LABELS[candidate.adminLevel],
+        rejection: regionRejection(candidate),
+      })),
+    );
   });
 
   hono.get("/api/places", (c) =>

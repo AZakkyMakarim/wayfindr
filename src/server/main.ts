@@ -4,6 +4,7 @@ import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { createApp } from "./app.ts";
 import { PlaywrightGoogleMapsSource } from "./google-maps-source/playwright.ts";
+import { NominatimRegionBoundaryFinder } from "./region-boundary-finder/nominatim.ts";
 
 const PORT = Number(process.env.PORT ?? 4321);
 const dataDir = join(process.cwd(), "data");
@@ -11,6 +12,7 @@ mkdirSync(dataDir, { recursive: true });
 
 const app = createApp({
   source: new PlaywrightGoogleMapsSource(),
+  regionBoundaryFinder: new NominatimRegionBoundaryFinder(),
   databaseFile: join(dataDir, "wayfindr.db"),
   photoDir: join(dataDir, "photos"),
 });
